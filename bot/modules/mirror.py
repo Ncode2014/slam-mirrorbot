@@ -65,7 +65,7 @@ class MirrorListener(listeners.MirrorListeners):
         with download_dict_lock:
             LOGGER.info(f"Download completed: {download_dict[self.uid].name()}")
             download = download_dict[self.uid]
-            name = download.name()
+            name = download.name().replace('/', '')
             gid = download.gid()
             size = download.size_raw()
             if name is None or self.isQbit: # when pyrogram's media.file_name is of NoneType
@@ -75,10 +75,7 @@ class MirrorListener(listeners.MirrorListeners):
             try:
                 with download_dict_lock:
                     download_dict[self.uid] = TarStatus(name, m_path, size)
-                if self.isZip:
-                    path = fs_utils.zip(name, m_path)
-                else:
-                    path = fs_utils.tar(m_path)
+                path = fs_utils.zip(name, m_path) if self.isZip else fs_utils.tar(m_path)
             except FileNotFoundError:
                 LOGGER.info('File to archive not found!')
                 self.onUploadError('Internal error occurred!!')
@@ -132,7 +129,6 @@ class MirrorListener(listeners.MirrorListeners):
                 fs_utils.clean_download(download.path())
             except Exception as e:
                 LOGGER.error(str(e))
-                pass
             count = len(download_dict)
         if self.message.from_user.username:
             uname = f"@{self.message.from_user.username}"
@@ -241,21 +237,11 @@ def _mirror(bot, update, isTar=False, extract=False, isZip=False, isQbit=False):
     qbitsel = False
     try:
         link = message_args[1]
-        if link == "qb" or link == "qbs":
+        if link in ["qb", "qbs"]:
             isQbit = True
             if link == "qbs":
                 qbitsel = True
             link = message_args[2]
-            if bot_utils.is_url(link) and not bot_utils.is_magnet(link):
-                resp = requests.get(link)
-                if resp.status_code == 200:
-                    file_name = str(time.time()).replace(".", "") + ".torrent"
-                    with open(file_name, "wb") as f:
-                        f.write(resp.content)
-                    link = f"{file_name}"
-                else:
-                    sendMessage("ERROR: link got HTTP response:" + resp.status_code, bot, update)
-                    return
         if link.startswith("|") or link.startswith("pswd: "):
             link = ''
     except IndexError:
@@ -291,26 +277,47 @@ def _mirror(bot, update, isTar=False, extract=False, isZip=False, isQbit=False):
             if i is not None:
                 file = i
                 break
+        if (
+            not bot_utils.is_url(link)
+            and not bot_utils.is_magnet(link)
+            or len(link) == 0
+        ) and file is not None:
+            if isQbit:
+                file_name = str(time.time()).replace(".", "") + ".torrent"
+                file.get_file().download(custom_path=f"{file_name}")
+                link = f"{file_name}"
+            elif file.mime_type != "application/x-bittorrent":
+                listener = MirrorListener(bot, update, pswd, isTar, extract, isZip)
+                tg_downloader = TelegramDownloadHelper(listener)
+                ms = update.message
+                tg_downloader.add_download(ms, f'{DOWNLOAD_DIR}{listener.uid}/', name)
+                return
+            else:
+                link = file.get_file().file_path
+        elif (
+              not bot_utils.is_url(link)
+              and not bot_utils.is_magnet(link)
+              or len(link) == 0
+        ) and file is None:
+            reply_text = reply_to.text
+            reply_text = re.split('\n ', reply_text)[0]
+            if bot_utils.is_url(reply_text) or bot_utils.is_magnet(reply_text):
+                link = reply_text
 
-        if not bot_utils.is_url(link) and not bot_utils.is_magnet(link) or len(link) == 0:
-            if file is not None:
-                if isQbit:
-                    file_name = str(time.time()).replace(".", "") + ".torrent"
-                    file.get_file().download(custom_path=f"{file_name}")
-                    link = f"{file_name}"
-                elif file.mime_type != "application/x-bittorrent":
-                    listener = MirrorListener(bot, update, pswd, isTar, extract, isZip)
-                    tg_downloader = TelegramDownloadHelper(listener)
-                    ms = update.message
-                    tg_downloader.add_download(ms, f'{DOWNLOAD_DIR}{listener.uid}/', name)
-                    return
-                else:
-                    link = file.get_file().file_path
+    if bot_utils.is_url(link) and not bot_utils.is_magnet(link) and not os.path.exists(link) and isQbit:
+        resp = requests.get(link)
+        if resp.status_code == 200:
+            file_name = str(time.time()).replace(".", "") + ".torrent"
+            open(file_name, "wb").write(resp.content)
+            link = f"{file_name}"
+        else:
+            sendMessage("ERROR: link got HTTP response:" + resp.status_code, bot, update)
+            return
 
-    if not bot_utils.is_url(link) and not bot_utils.is_magnet(link):
+    elif not bot_utils.is_url(link) and not bot_utils.is_magnet(link):
         sendMessage('No download source provided', bot, update)
         return
-    if not os.path.exists(link) and not bot_utils.is_mega_link(link) and not bot_utils.is_gdrive_link(link) and not bot_utils.is_magnet(link):
+    elif not os.path.exists(link) and not bot_utils.is_mega_link(link) and not bot_utils.is_gdrive_link(link) and not bot_utils.is_magnet(link):
         try:
             link = direct_link_generator(link)
         except DirectDownloadLinkException as e:
